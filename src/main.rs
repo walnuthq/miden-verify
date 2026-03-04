@@ -17,6 +17,9 @@ struct Args {
     /// The contract account address
     #[arg(value_name = "ACCOUNT_ADDRESS")]
     account_address: String,
+    // /// The network id (mtst = testnet, mdev = devnet)
+    // #[arg(long, default_value = "mtst", value_name = "NETWORK_ID")]
+    // network_id: String,
     /// The project path (where the contract project lives)
     #[arg(long, default_value = ".", value_name = "PROJECT_PATH")]
     project_path: PathBuf,
@@ -103,12 +106,16 @@ async fn main() -> Result<()> {
 
     let body = VerifyAccountComponentRequestBody {
         account_id: account_id.to_hex(),
-        identifier: account_id.to_bech32(network_id),
+        identifier: account_id.to_bech32(network_id.clone()),
         cargo_toml,
         rust,
     };
     let client = Client::builder().build()?;
-    let response = client.post(args.verifier_url).json(&body).send().await?;
+    let response = client
+        .post(format!("{}/{}", args.verifier_url, network_id.as_str()))
+        .json(&body)
+        .send()
+        .await?;
 
     let text = response.text().await?;
     match serde_json::from_str::<VerifyAccountComponentRequestResponse>(&text) {
