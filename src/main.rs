@@ -1,35 +1,54 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use cargo_toml::Manifest;
 use clap::Parser;
-use miden_protocol::{account::AccountId, address::Address, address::AddressId};
+use miden_protocol::{
+    account::AccountId,
+    address::{Address, AddressId, NetworkId},
+    note::NoteId,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
-/// CLI to verify Miden accounts
+/// CLI to verify Miden accounts & notes
 #[derive(Parser, Debug)]
 #[command(
     name = "miden-verify",
     version,
-    about = "Verify Miden accounts",
+    about = "Verify Miden accounts & notes",
     long_about = None
 )]
 struct Args {
-    /// The contract account address
-    #[arg(value_name = "ACCOUNT_ADDRESS")]
-    account_address: String,
-    // /// The network id (mtst = testnet, mdev = devnet)
-    // #[arg(long, default_value = "mtst", value_name = "NETWORK_ID")]
-    // network_id: String,
-    /// The project path (where the contract project lives)
+    /// Network ID (mtst = testnet, mdev = devnet)
+    #[arg(long, default_value = "mtst", value_name = "NETWORK_ID")]
+    network_id: String,
+    /// Account address, account ID, or note ID to verify
+    #[arg(value_name = "RESOURCE_ID")]
+    resource_id: String,
+    /// Project path containing Cargo.toml and src/lib.rs
     #[arg(long, default_value = ".", value_name = "PROJECT_PATH")]
     project_path: PathBuf,
-    /// The verifier URL (API endpoint responsible for verifying)
+    /// Verifier API endpoint
     #[arg(
         long,
-        default_value = "https://miden-playground-api.walnut.dev/verified-account-components",
+        default_value = "https://miden-playground-api.walnut.dev",
         value_name = "VERIFIER_URL"
     )]
     verifier_url: String,
+}
+
+// --- Request / response types ---
+
+#[derive(Debug, Serialize)]
+struct PackageSource {
+    #[serde(rename = "cargoToml")]
+    cargo_toml: String,
+    rust: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,108 +56,222 @@ struct VerifyAccountComponentRequestBody {
     #[serde(rename = "accountId")]
     account_id: String,
     identifier: String,
-    #[serde(rename = "cargoToml")]
-    cargo_toml: String,
-    rust: String,
+    #[serde(rename = "packageSource")]
+    package_source: PackageSource,
+}
+
+#[derive(Debug, Serialize)]
+struct VerifyNoteRequestBody {
+    #[serde(rename = "noteId")]
+    note_id: String,
+    #[serde(rename = "packageSource")]
+    package_source: PackageSource,
+    dependencies: Vec<PackageSource>,
 }
 
 #[derive(Debug, Deserialize)]
-struct VerifyAccountComponentRequestResponse {
-    ok: bool,
-    #[serde(default)]
-    verified: Option<bool>,
-    #[serde(default)]
-    error: Option<String>,
+struct VerifyResponse {
+    verified: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
+// --- Cargo.toml metadata types for dependency resolution ---
 
-    let (account_id, network_id) = match AccountId::parse(&args.account_address) {
-        Ok((account_id, network_id)) => (account_id, network_id.unwrap()),
-        Err(_) => {
-            let (network_id, address) = match Address::decode(&args.account_address) {
-                Ok(result) => result,
-                Err(error) => {
-                    eprintln!("Failed to parse account ID: {}", error);
-                    std::process::exit(1);
-                }
-            };
-            let decoded_account_id = match address.id() {
-                AddressId::AccountId(id) => id,
-                _ => {
-                    eprintln!("Failed to parse account ID");
-                    std::process::exit(1);
-                }
-            };
-            (decoded_account_id, network_id)
-        }
+#[derive(Deserialize)]
+struct MidenDependency {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct MidenMetadata {
+    #[serde(default)]
+    dependencies: HashMap<String, MidenDependency>,
+}
+
+#[derive(Deserialize)]
+struct PackageMetadata {
+    miden: Option<MidenMetadata>,
+}
+
+// --- Resource parsing ---
+
+enum Resource {
+    Account {
+        network_id: Option<NetworkId>,
+        account_id: AccountId,
+    },
+    Note(NoteId),
+}
+
+fn parse_resource_id(resource_id: &str) -> Result<Resource> {
+    if let Ok((account_id, network_id)) = AccountId::parse(resource_id) {
+        return Ok(Resource::Account {
+            network_id,
+            account_id,
+        });
+    }
+    if let Ok((network_id, address)) = Address::decode(resource_id) {
+        let AddressId::AccountId(account_id) = address.id() else {
+            bail!("address '{}' does not contain an account ID", resource_id);
+        };
+        return Ok(Resource::Account {
+            network_id: Some(network_id),
+            account_id,
+        });
+    }
+    if let Ok(note_id) = NoteId::try_from_hex(resource_id) {
+        return Ok(Resource::Note(note_id));
+    }
+    bail!(
+        "'{}' is not a valid account address, account ID, or note ID",
+        resource_id
+    )
+}
+
+// --- Package source helpers ---
+
+fn read_package_source(project_dir: &Path) -> Result<PackageSource> {
+    let cargo_toml =
+        fs::read_to_string(project_dir.join("Cargo.toml")).context("failed to read Cargo.toml")?;
+    let rust =
+        fs::read_to_string(project_dir.join("src/lib.rs")).context("failed to read src/lib.rs")?;
+    Ok(PackageSource { cargo_toml, rust })
+}
+
+fn read_package_dependencies(cargo_toml: &str, project_dir: &Path) -> Result<Vec<PackageSource>> {
+    let manifest = Manifest::<PackageMetadata>::from_slice_with_metadata(cargo_toml.as_bytes())
+        .context("failed to parse Cargo.toml")?;
+    let Some(miden) = manifest
+        .package
+        .and_then(|p| p.metadata)
+        .and_then(|m| m.miden)
+    else {
+        return Ok(vec![]);
     };
+    miden
+        .dependencies
+        .values()
+        .map(|dep| read_package_source(&project_dir.join(&dep.path)))
+        .collect()
+}
 
+// --- Verification ---
+
+async fn post_verify<B: Serialize + ?Sized>(client: &Client, url: &str, body: &B) -> Result<bool> {
+    let response = client
+        .post(url)
+        .json(body)
+        .send()
+        .await
+        .context("failed to send verification request")?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        bail!("verifier returned {}: {}", status, text);
+    }
+    let VerifyResponse { verified } = response
+        .json()
+        .await
+        .context("failed to parse verifier response")?;
+    Ok(verified)
+}
+
+async fn verify_account_component(
+    client: &Client,
+    network_id: &NetworkId,
+    account_id: &AccountId,
+    project_dir: &Path,
+    verifier_url: &str,
+) -> Result<bool> {
     println!(
-        "Verifying account ID {} on network {}, project path: {}",
+        "Verifying account {} on network {}, project: {}",
         account_id,
         network_id,
-        args.project_path.display()
+        project_dir.display()
     );
-
-    let project_dir = args.project_path.as_path();
-    // Check that the directory exists
-    if !project_dir.is_dir() {
-        eprintln!("Error: '{}' is not a directory", project_dir.display());
-        std::process::exit(1);
-    }
-    // Read Cargo.toml
-    let cargo_path = project_dir.join("Cargo.toml");
-    if !cargo_path.is_file() {
-        eprintln!("Error: Cargo.toml not found in {}", project_dir.display());
-        std::process::exit(1);
-    }
-    let cargo_toml = fs::read_to_string(&cargo_path).context("Failed to read Cargo.toml")?;
-    // Read src/lib.rs
-    let lib_path = project_dir.join("src").join("lib.rs");
-    if !lib_path.is_file() {
-        eprintln!("Error: src/lib.rs not found in {}", project_dir.display());
-        std::process::exit(1);
-    }
-    let rust = fs::read_to_string(&lib_path).context("Failed to read src/lib.rs")?;
-
     let body = VerifyAccountComponentRequestBody {
         account_id: account_id.to_hex(),
         identifier: account_id.to_bech32(network_id.clone()),
-        cargo_toml,
-        rust,
+        package_source: read_package_source(project_dir)?,
     };
-    let client = Client::builder().build()?;
-    let response = client
-        .post(format!("{}/{}", args.verifier_url, network_id.as_str()))
-        .json(&body)
-        .send()
-        .await?;
+    let url = format!(
+        "{}/verified-account-components/{}",
+        verifier_url,
+        network_id.as_str()
+    );
+    post_verify(client, &url, &body).await
+}
 
-    let text = response.text().await?;
-    match serde_json::from_str::<VerifyAccountComponentRequestResponse>(&text) {
-        Ok(response) => {
-            if response.ok {
-                let verified = response.verified.unwrap();
-                if verified {
-                    println!("Account component successfully verified.");
-                } else {
-                    println!("Account component not verified.");
-                }
-            } else {
-                if let Some(error) = response.error {
-                    eprintln!("Account component verification error: {}", error);
-                    std::process::exit(1);
-                }
-            }
-        }
-        Err(error) => {
-            eprintln!("Failed to parse JSON response: {}", error);
-            std::process::exit(1);
-        }
+async fn verify_note(
+    client: &Client,
+    network_id: &NetworkId,
+    note_id: &NoteId,
+    project_dir: &Path,
+    verifier_url: &str,
+) -> Result<bool> {
+    println!(
+        "Verifying note {} on network {}, project: {}",
+        note_id,
+        network_id,
+        project_dir.display()
+    );
+    let package_source = read_package_source(project_dir)?;
+    let dependencies = read_package_dependencies(&package_source.cargo_toml, project_dir)?;
+    let body = VerifyNoteRequestBody {
+        note_id: note_id.to_hex(),
+        package_source,
+        dependencies,
+    };
+    let url = format!("{}/verified-notes/{}", verifier_url, network_id.as_str());
+    post_verify(client, &url, &body).await
+}
+
+#[tokio::main]
+async fn main() -> Result<ExitCode> {
+    let args = Args::parse();
+
+    let fallback_network_id = NetworkId::new(&args.network_id).context("invalid --network-id")?;
+
+    let project_dir = args.project_path.as_path();
+    if !project_dir.is_dir() {
+        bail!("'{}' is not a directory", project_dir.display());
     }
 
-    Ok(())
+    let client = Client::new();
+
+    let (verified, kind) = match parse_resource_id(&args.resource_id)? {
+        Resource::Account {
+            network_id,
+            account_id,
+        } => {
+            let network_id = network_id.unwrap_or(fallback_network_id);
+            let verified = verify_account_component(
+                &client,
+                &network_id,
+                &account_id,
+                project_dir,
+                &args.verifier_url,
+            )
+            .await?;
+            (verified, "Account component")
+        }
+        Resource::Note(note_id) => {
+            let verified = verify_note(
+                &client,
+                &fallback_network_id,
+                &note_id,
+                project_dir,
+                &args.verifier_url,
+            )
+            .await?;
+            (verified, "Note script")
+        }
+    };
+
+    if verified {
+        println!("{} successfully verified", kind);
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("{} could not be verified", kind);
+        Ok(ExitCode::FAILURE)
+    }
 }
