@@ -24,12 +24,12 @@ use std::{
     long_about = None
 )]
 struct Args {
-    /// Network ID (mtst = testnet, mdev = devnet)
-    #[arg(long, default_value = "mtst", value_name = "NETWORK_ID")]
-    network_id: String,
     /// Account address, account ID, or note ID to verify
     #[arg(value_name = "RESOURCE_ID")]
     resource_id: String,
+    /// Network ID (mtst = testnet, mdev = devnet)
+    #[arg(long, default_value = "mtst", value_name = "NETWORK_ID")]
+    network_id: String,
     /// Project path containing Cargo.toml and src/lib.rs
     #[arg(long, default_value = ".", value_name = "PROJECT_PATH")]
     project_path: PathBuf,
@@ -121,10 +121,7 @@ fn parse_resource_id(resource_id: &str) -> Result<Resource> {
     if let Ok(note_id) = NoteId::try_from_hex(resource_id) {
         return Ok(Resource::Note(note_id));
     }
-    bail!(
-        "'{}' is not a valid account address, account ID, or note ID",
-        resource_id
-    )
+    bail!("'{}' is not a valid account address, account ID, or note ID", resource_id)
 }
 
 // --- Package source helpers ---
@@ -140,11 +137,7 @@ fn read_package_source(project_dir: &Path) -> Result<PackageSource> {
 fn read_package_dependencies(cargo_toml: &str, project_dir: &Path) -> Result<Vec<PackageSource>> {
     let manifest = Manifest::<PackageMetadata>::from_slice_with_metadata(cargo_toml.as_bytes())
         .context("failed to parse Cargo.toml")?;
-    let Some(miden) = manifest
-        .package
-        .and_then(|p| p.metadata)
-        .and_then(|m| m.miden)
-    else {
+    let Some(miden) = manifest.package.and_then(|p| p.metadata).and_then(|m| m.miden) else {
         return Ok(vec![]);
     };
     miden
@@ -168,10 +161,8 @@ async fn post_verify<B: Serialize + ?Sized>(client: &Client, url: &str, body: &B
         let text = response.text().await.unwrap_or_default();
         bail!("verifier returned {}: {}", status, text);
     }
-    let VerifyResponse { verified } = response
-        .json()
-        .await
-        .context("failed to parse verifier response")?;
+    let VerifyResponse { verified } =
+        response.json().await.context("failed to parse verifier response")?;
     Ok(verified)
 }
 
@@ -193,11 +184,7 @@ async fn verify_account_component(
         identifier: account_id.to_bech32(network_id.clone()),
         package_source: read_package_source(project_dir)?,
     };
-    let url = format!(
-        "{}/verified-account-components/{}",
-        verifier_url,
-        network_id.as_str()
-    );
+    let url = format!("{}/verified-account-components/{}", verifier_url, network_id.as_str());
     post_verify(client, &url, &body).await
 }
 

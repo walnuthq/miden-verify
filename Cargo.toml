@@ -1,6 +1,15 @@
 [package]
 name = "miden-verify"
 version = "0.1.0"
+description = "Verify Miden accounts and notes from the CLI"
+authors = ["Miden contributors"]
+repository = "https://github.com/walnuthq/miden-verify"
+homepage = "https://github.com/walnuthq/miden-verify"
+documentation = "https://github.com/walnuthq/miden-verify"
+categories = ["command-line-utilities"]
+keywords = ["miden"]
+license = "MIT"
+readme = "README.md"
 edition = "2024"
 
 [dependencies]
