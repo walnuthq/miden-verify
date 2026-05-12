@@ -18,3 +18,8 @@ build/
 
 # MacOS generated files
 **/.DS_Store
+
+# Agents
+.agents/
+.claude/
+skills-lock.json
