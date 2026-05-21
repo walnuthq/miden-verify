@@ -1,6 +1,6 @@
 [package]
 name = "miden-verify"
-version = "0.2.0"
+version = "0.3.0"
 description = "Verify Miden accounts and notes from the command line."
 authors = ["Miden contributors"]
 repository = "https://github.com/walnuthq/miden-verify"
