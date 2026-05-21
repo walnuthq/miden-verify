@@ -1,59 +1,81 @@
 name: Release
 
+permissions:
+  contents: read
+
 on:
   release:
     types: [published]
 
-permissions:
-  contents: read
-
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
+  cargo-publish:
+    name: Cargo publish
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'walnuthq' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
+      - name: Log release info
+        run: |
+          echo "Publishing release ${{ github.event.release.tag_name }}"
+          echo "Commit: $(git rev-parse HEAD)"
+      - name: Update Rust toolchain
+        run: |
+          rustup update --no-self-update
+      - name: Publish to crates.io
+        run: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Upload the miden-verify CLI as an artifact on the Github release.
+  # This is used by midenup to speed installs up.
+  upload-artifacts:
+    name: Upload pre-built miden-verify executable artifacts
+    if: ${{ github.repository_owner == 'walnuthq' }}
     permissions:
       contents: write
       id-token: write
       attestations: write
-    runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-
+        os: [macos-latest, ubuntu-latest]
+        target: [aarch64-apple-darwin, x86_64-unknown-linux-gnu]
+        exclude:
+          - os: macos-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - name: Checkout repository
+        uses: actions/checkout@v6
         with:
-          toolchain: "1.94"
-          targets: ${{ matrix.target }}
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
-      - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/miden-verify miden-verify-${{ matrix.target }}
-
-      - name: Attest
-        uses: actions/attest@v4
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update
+          rustc --version
+      - name: Add target
+        run: |
+          rustup target add ${{ matrix.target }}
+      - name: Build miden-verify
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+      - name: Prepare artifact
+        run: |
+          mv target/${{ matrix.target }}/release/miden-verify miden-verify-${{ matrix.target }}
+      - name: Attest miden-verify
+        uses: actions/attest-build-provenance@v3
         with:
           subject-path: miden-verify-${{ matrix.target }}
-
       - name: Upload
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          gh release upload ${RELEASE_TAG} miden-verify-${{ matrix.target }}
+          gh release upload ${RELEASE_TAG} miden-faucet-client-${{ matrix.target }}
