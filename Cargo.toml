@@ -1,7 +1,7 @@
 [package]
 name = "miden-verify"
-version = "0.1.0"
-description = "Verify Miden accounts and notes from the CLI"
+version = "0.2.0"
+description = "Verify Miden accounts and notes from the command line."
 authors = ["Miden contributors"]
 repository = "https://github.com/walnuthq/miden-verify"
 homepage = "https://github.com/walnuthq/miden-verify"
@@ -16,7 +16,7 @@ edition = "2024"
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 miden-protocol = { version = "0.14" }
-tokio = { version = "1.51", features = ["rt-multi-thread", "net", "macros", "fs"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "net", "macros", "fs"] }
 reqwest = { version = "0.13", features = ["json"] }
 serde = "1.0"
 cargo_toml = "0.22"
