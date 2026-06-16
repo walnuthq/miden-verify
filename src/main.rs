@@ -38,7 +38,7 @@ struct Args {
     /// Verifier API endpoint
     #[arg(
         long,
-        default_value = "https://miden-sourcify-api-registry.walnut.dev",
+        default_value = "https://miden-source-code-verification-api-registry.walnut.dev",
         value_name = "VERIFIER_URL"
     )]
     verifier_url: String,
@@ -389,10 +389,10 @@ mod tests {
         let project_dir = template_dir();
         let network_id = NetworkId::new("mtst").expect("network id");
 
-        let Resource::Note(note_id) = parse_resource_id(
-            "0x44891875fb920d963352fcd6623e1f3c97dd1e4d8cdc084778eeb4bbdf72dbac",
-        )
-        .expect("parse resource id") else {
+        let Resource::Note(note_id) =
+            parse_resource_id("0x44891875fb920d963352fcd6623e1f3c97dd1e4d8cdc084778eeb4bbdf72dbac")
+                .expect("parse resource id")
+        else {
             panic!("expected a note resource");
         };
 
