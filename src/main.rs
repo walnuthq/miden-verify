@@ -46,12 +46,17 @@ struct Args {
 
 // --- Request / response types ---
 
+/// Identifier of the client originating verification requests, recorded on the
+/// verified account/note by the registry.
+const SOURCE: &str = "miden-verify";
+
 #[derive(Debug, Serialize)]
 struct VerifyAccountRequestBody {
     #[serde(rename = "accountId")]
     account_id: String,
     files: BTreeMap<String, String>,
     entrypoint: String,
+    source: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +65,7 @@ struct VerifyNoteRequestBody {
     note_id: String,
     files: BTreeMap<String, String>,
     entrypoint: String,
+    source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,9 +117,10 @@ fn relative_key(rel: &Path) -> Option<String> {
 
 /// Decides whether a project-relative file path should be uploaded.
 ///
-/// Included: `Cargo.toml`, `rust-toolchain.toml`, `.cargo/config.toml`, and any
-/// file living under a `src/` directory (recursively). Everything else
-/// (notably `Cargo.lock`, build artifacts) is excluded.
+/// Included: `Cargo.toml`, `miden-project.toml`, `rust-toolchain.toml`,
+/// `.cargo/config.toml`, and any file living under a `src/` directory
+/// (recursively). Everything else (notably `Cargo.lock`, build artifacts) is
+/// excluded.
 fn is_included(rel: &Path) -> bool {
     let components = rel.components().filter_map(|c| c.as_os_str().to_str()).collect::<Vec<_>>();
     let Some((file_name, parents)) = components.split_last() else {
@@ -123,7 +130,10 @@ fn is_included(rel: &Path) -> bool {
     if parents.contains(&"src") {
         return true;
     }
-    if *file_name == "Cargo.toml" || *file_name == "rust-toolchain.toml" {
+    if *file_name == "Cargo.toml"
+        || *file_name == "miden-project.toml"
+        || *file_name == "rust-toolchain.toml"
+    {
         return true;
     }
     // `.cargo/config.toml`
@@ -208,6 +218,7 @@ async fn verify_account_component(
         account_id: account_id.to_hex(),
         files: build_files_map(project_dir)?,
         entrypoint: entrypoint.to_string(),
+        source: SOURCE.to_string(),
     };
     let url = format!("{}/v1/{}/verified-accounts", verifier_url, network_id.as_str());
     post_verify(client, &url, &body).await
@@ -232,6 +243,7 @@ async fn verify_note(
         note_id: note_id.to_hex(),
         files: build_files_map(project_dir)?,
         entrypoint: entrypoint.to_string(),
+        source: SOURCE.to_string(),
     };
     let url = format!("{}/v1/{}/verified-notes", verifier_url, network_id.as_str());
     post_verify(client, &url, &body).await
@@ -306,7 +318,13 @@ mod tests {
         let keys: Vec<&str> = files.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec![".cargo/config.toml", "Cargo.toml", "rust-toolchain.toml", "src/lib.rs"],
+            vec![
+                ".cargo/config.toml",
+                "Cargo.toml",
+                "miden-project.toml",
+                "rust-toolchain.toml",
+                "src/lib.rs"
+            ],
             "unexpected file set for single-package project_path"
         );
 
@@ -326,8 +344,13 @@ mod tests {
         let files = build_files_map(&dir).expect("build_files_map");
 
         for pkg in ["counter-account", "increment-note"] {
-            for suffix in ["Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml", "src/lib.rs"]
-            {
+            for suffix in [
+                "Cargo.toml",
+                "miden-project.toml",
+                "rust-toolchain.toml",
+                ".cargo/config.toml",
+                "src/lib.rs",
+            ] {
                 let key = format!("{pkg}/{suffix}");
                 assert!(files.contains_key(&key), "missing expected key {key}");
             }
@@ -359,7 +382,7 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Account { account_id, .. } =
-            parse_resource_id("0x2a4ffb87b51720105c3bf91e5e7bd8").expect("parse resource id")
+            parse_resource_id("0xa070576e2ee8d311021079d99e1374").expect("parse resource id")
         else {
             panic!("expected an account resource");
         };
@@ -390,7 +413,7 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Note(note_id) =
-            parse_resource_id("0x44891875fb920d963352fcd6623e1f3c97dd1e4d8cdc084778eeb4bbdf72dbac")
+            parse_resource_id("0x5101df16c6b3d79a0e680e4a08c813cbc634e59c51bae4e83b8a8bd69f614160")
                 .expect("parse resource id")
         else {
             panic!("expected a note resource");

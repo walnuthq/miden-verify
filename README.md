@@ -37,7 +37,7 @@ miden verify 0x44891875fb920d963352fcd6623e1f3c97dd1e4d8cdc084778eeb4bbdf72dbac 
 
 - `<RESOURCE_ID>` Account address, account ID or note ID (required).
 - `--network-id <NETWORK_ID>` Network ID (mtst/mdev, required when not decoded from account address, defaults to `mtst`).
-- `--project-path <PROJECT_PATH>` Top-level project directory containing the entrypoint package and its dependencies (defaults to the current working directory). The CLI uploads `Cargo.toml`, `rust-toolchain.toml`, `.cargo/config.toml` and `src/` files found in the tree.
+- `--project-path <PROJECT_PATH>` Top-level project directory containing the entrypoint package and its dependencies (defaults to the current working directory). The CLI uploads `Cargo.toml`, `miden-project.toml`, `rust-toolchain.toml`, `.cargo/config.toml` and `src/` files found in the tree.
 - `--entrypoint <ENTRYPOINT>` Entrypoint package relative to `PROJECT_PATH` identifying the main package (defaults to `.`).
 - `--verifier-url <VERIFIER_URL>` Verification API endpoint (defaults to `https://miden-source-code-verification-api-registry.walnut.dev`).
 
