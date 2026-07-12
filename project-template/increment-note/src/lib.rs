@@ -10,7 +10,9 @@
 
 use miden::*;
 
-use crate::bindings::miden::counter_account::counter_account;
+/// Native account of the note: exposes the `counter-contract` component methods gathered from the `counter-contract` package.
+#[account(counter_account::CounterContract)]
+pub struct CounterContract;
 
 #[note]
 struct IncrementNote;
@@ -18,11 +20,11 @@ struct IncrementNote;
 #[note]
 impl IncrementNote {
     #[note_script]
-    fn run(self, _arg: Word) {
-        let initial_value = counter_account::get_count();
-        counter_account::increment_count();
+    fn run(self, _arg: Word, account: &mut CounterContract) {
+        let initial_value = account.get_count();
+        account.increment_count();
         let expected_value = initial_value + Felt::from_u32(1);
-        let final_value = counter_account::get_count();
+        let final_value = account.get_count();
         assert_eq(final_value, expected_value);
     }
 }
