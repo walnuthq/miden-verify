@@ -1,3 +1,10 @@
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
+
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use miden_protocol::{
@@ -7,12 +14,6 @@ use miden_protocol::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-    process::ExitCode,
-};
 
 /// CLI to verify Miden accounts & notes
 #[derive(Parser, Debug)]
@@ -117,10 +118,11 @@ fn relative_key(rel: &Path) -> Option<String> {
 
 /// Decides whether a project-relative file path should be uploaded.
 ///
-/// Included: `Cargo.toml`, `miden-project.toml`, `rust-toolchain.toml`,
-/// `.cargo/config.toml`, and any file living under a `src/` directory
-/// (recursively). Everything else (notably `Cargo.lock`, build artifacts) is
-/// excluded.
+/// Included: `Cargo.toml`, `Cargo.lock` (pins dependency versions so the
+/// verifier reproduces the same build), `build.rs`, `miden-project.toml`,
+/// `rust-toolchain.toml`, `.cargo/config.toml`, and any file living under a
+/// `src/` directory (recursively). Everything else is excluded; `target/`
+/// build artifacts are never walked.
 fn is_included(rel: &Path) -> bool {
     let components = rel.components().filter_map(|c| c.as_os_str().to_str()).collect::<Vec<_>>();
     let Some((file_name, parents)) = components.split_last() else {
@@ -130,10 +132,10 @@ fn is_included(rel: &Path) -> bool {
     if parents.contains(&"src") {
         return true;
     }
-    if *file_name == "Cargo.toml"
-        || *file_name == "miden-project.toml"
-        || *file_name == "rust-toolchain.toml"
-    {
+    if matches!(
+        *file_name,
+        "Cargo.toml" | "Cargo.lock" | "build.rs" | "miden-project.toml" | "rust-toolchain.toml"
+    ) {
         return true;
     }
     // `.cargo/config.toml`
@@ -310,9 +312,32 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("project-template")
     }
 
+    /// Temporary project tree, removed on drop.
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(name: &str, files: &[(&str, &str)]) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("miden-verify-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            for (rel, content) in files {
+                let path = root.join(rel);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, content).unwrap();
+            }
+            Self(root)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn single_package_root() {
-        let dir = template_dir().join("counter-account");
+        let dir = template_dir().join("counter-contract");
         let files = build_files_map(&dir).expect("build_files_map");
 
         let keys: Vec<&str> = files.keys().map(String::as_str).collect();
@@ -320,7 +345,9 @@ mod tests {
             keys,
             vec![
                 ".cargo/config.toml",
+                "Cargo.lock",
                 "Cargo.toml",
+                "build.rs",
                 "miden-project.toml",
                 "rust-toolchain.toml",
                 "src/lib.rs"
@@ -329,12 +356,13 @@ mod tests {
         );
 
         // Excluded files must not appear.
-        assert!(!files.contains_key("Cargo.lock"));
         assert!(!files.contains_key(".DS_Store"));
 
         // Contents are read verbatim from disk.
         let expected = fs::read_to_string(dir.join("src/lib.rs")).unwrap();
         assert_eq!(files["src/lib.rs"], expected);
+        let expected = fs::read_to_string(dir.join("build.rs")).unwrap();
+        assert_eq!(files["build.rs"], expected);
         assert!(!files["Cargo.toml"].is_empty());
     }
 
@@ -343,9 +371,11 @@ mod tests {
         let dir = template_dir();
         let files = build_files_map(&dir).expect("build_files_map");
 
-        for pkg in ["counter-account", "increment-note"] {
+        for pkg in ["counter-contract", "counter-note"] {
             for suffix in [
                 "Cargo.toml",
+                "Cargo.lock",
+                "build.rs",
                 "miden-project.toml",
                 "rust-toolchain.toml",
                 ".cargo/config.toml",
@@ -355,19 +385,59 @@ mod tests {
                 assert!(files.contains_key(&key), "missing expected key {key}");
             }
         }
-
-        // No Cargo.lock from either package should be uploaded.
-        assert!(files.keys().all(|k| !k.ends_with("Cargo.lock")), "Cargo.lock leaked into files");
     }
 
     #[test]
-    fn excludes_artifacts_and_hidden_files() {
-        let files = build_files_map(&template_dir()).expect("build_files_map");
-        assert!(
-            files.keys().all(|k| !k.split('/').any(|c| c == "target")),
-            "target/ artifacts must be excluded"
+    fn includes_lockfile_and_excludes_artifacts_and_hidden_files() {
+        let fixture = Fixture::new(
+            "collect",
+            &[
+                ("Cargo.toml", "[package]"),
+                ("Cargo.lock", "version = 4"),
+                ("build.rs", "fn main() {}"),
+                ("miden-project.toml", "[package]"),
+                ("rust-toolchain.toml", "[toolchain]"),
+                (".cargo/config.toml", "[build]"),
+                ("src/lib.rs", "// lib"),
+                ("src/nested/mod.rs", "// nested"),
+                ("README.md", "# readme"),
+                (".DS_Store", ""),
+                // `cargo package` output mirrors included files and must be skipped.
+                ("target/package/pkg-0.1.0/Cargo.toml", "[package]"),
+                ("target/package/pkg-0.1.0/Cargo.lock", "version = 4"),
+                ("target/package/pkg-0.1.0/src/lib.rs", "// lib"),
+            ],
         );
-        assert!(files.keys().all(|k| !k.ends_with(".DS_Store")), ".DS_Store must be excluded");
+        let files = build_files_map(&fixture.0).expect("build_files_map");
+
+        let keys: Vec<&str> = files.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                ".cargo/config.toml",
+                "Cargo.lock",
+                "Cargo.toml",
+                "build.rs",
+                "miden-project.toml",
+                "rust-toolchain.toml",
+                "src/lib.rs",
+                "src/nested/mod.rs",
+            ],
+            "unexpected file set"
+        );
+        assert_eq!(files["Cargo.lock"], "version = 4");
+    }
+
+    /// Unwraps a verification result, counting the registry's "already verified"
+    /// rejection as a success: the registry only raises it once the compiled
+    /// package has matched on-chain, and it is what every run after the first
+    /// one gets back, since a successful verification is recorded.
+    fn verified_or_already_verified(result: Result<bool>, already_verified: &str) -> bool {
+        match result {
+            Ok(verified) => verified,
+            Err(err) if err.to_string().contains(already_verified) => true,
+            Err(err) => panic!("verification request: {err:#}"),
+        }
     }
 
     /// End-to-end check against a locally running verifier.
@@ -378,16 +448,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a local verifier running at http://localhost:8081"]
     async fn verifies_account_against_local_verifier() {
-        let project_dir = template_dir().join("counter-account");
+        let project_dir = template_dir().join("counter-contract");
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Account { account_id, .. } =
-            parse_resource_id("0xa070576e2ee8d311021079d99e1374").expect("parse resource id")
+            parse_resource_id("0xdef0e93b672a39117a3af1520c6047").expect("parse resource id")
         else {
             panic!("expected an account resource");
         };
 
-        let verified = verify_account_component(
+        let result = verify_account_component(
             &Client::new(),
             &network_id,
             &account_id,
@@ -395,8 +465,8 @@ mod tests {
             ".",
             "http://localhost:8081",
         )
-        .await
-        .expect("verification request");
+        .await;
+        let verified = verified_or_already_verified(result, "account component already verified");
 
         assert!(verified, "account should be verified by the local verifier");
     }
@@ -413,22 +483,22 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Note(note_id) =
-            parse_resource_id("0x5101df16c6b3d79a0e680e4a08c813cbc634e59c51bae4e83b8a8bd69f614160")
+            parse_resource_id("0x7c6f75aeedeca77ef95c2ac95b69c59a064c30ab037a46a843b0f5a7dc0f6a30")
                 .expect("parse resource id")
         else {
             panic!("expected a note resource");
         };
 
-        let verified = verify_note(
+        let result = verify_note(
             &Client::new(),
             &network_id,
             &note_id,
             &project_dir,
-            "increment-note",
+            "counter-note",
             "http://localhost:8081",
         )
-        .await
-        .expect("verification request");
+        .await;
+        let verified = verified_or_already_verified(result, "note already verified");
 
         assert!(verified, "note should be verified by the local verifier");
     }
