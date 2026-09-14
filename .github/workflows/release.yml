@@ -14,7 +14,7 @@ jobs:
     if: ${{ github.repository_owner == 'walnuthq' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.tag_name }}
@@ -51,7 +51,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.tag_name }}
@@ -69,7 +69,7 @@ jobs:
         run: |
           mv target/${{ matrix.target }}/release/miden-verify miden-verify-${{ matrix.target }}
       - name: Attest miden-verify
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest@v4
         with:
           subject-path: miden-verify-${{ matrix.target }}
       - name: Upload

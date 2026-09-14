@@ -16,13 +16,13 @@ To get started, you must first install [midenup](https://github.com/0xMiden/mide
 Pass the account ID (or address) of the deployed account:
 
 ```
-miden verify 0x2a4ffb87b51720105c3bf91e5e7bd8 --project-path ~/miden-verify/project-template/counter-account
+miden verify 0xdef0e93b672a39117a3af1520c6047 --project-path ~/miden-verify/project-template/counter-contract
 ```
 
 You can also pass a bech32 account address, which carries its own network ID:
 
 ```
-miden verify mtst1aq4yl7u8k5tjqyzu80u3uhnmmqam87dz --project-path ~/miden-verify/project-template/counter-account
+miden verify mtst1ar00p6fmvu4rjyt68tc4yrrqguh55ssx --project-path ~/miden-verify/project-template/counter-contract
 ```
 
 ### Verifying a note with dependencies
@@ -30,14 +30,14 @@ miden verify mtst1aq4yl7u8k5tjqyzu80u3uhnmmqam87dz --project-path ~/miden-verify
 When the project path contains several packages (the entrypoint package and its dependencies), point `--project-path` at the top-level directory and select the entrypoint package with `--entrypoint`:
 
 ```
-miden verify 0x44891875fb920d963352fcd6623e1f3c97dd1e4d8cdc084778eeb4bbdf72dbac --project-path ~/miden-verify/project-template --entrypoint increment-note
+miden verify 0x7c6f75aeedeca77ef95c2ac95b69c59a064c30ab037a46a843b0f5a7dc0f6a30 --project-path ~/miden-verify/project-template --entrypoint counter-note
 ```
 
 ### Options
 
 - `<RESOURCE_ID>` Account address, account ID or note ID (required).
 - `--network-id <NETWORK_ID>` Network ID (mtst/mdev, required when not decoded from account address, defaults to `mtst`).
-- `--project-path <PROJECT_PATH>` Top-level project directory containing the entrypoint package and its dependencies (defaults to the current working directory). The CLI uploads `Cargo.toml`, `miden-project.toml`, `rust-toolchain.toml`, `.cargo/config.toml` and `src/` files found in the tree.
+- `--project-path <PROJECT_PATH>` Top-level project directory containing the entrypoint package and its dependencies (defaults to the current working directory). The CLI uploads `Cargo.toml`, `Cargo.lock`, `build.rs`, `miden-project.toml`, `rust-toolchain.toml`, `.cargo/config.toml` and `src/` files found in the tree (`target/` directories are skipped).
 - `--entrypoint <ENTRYPOINT>` Entrypoint package relative to `PROJECT_PATH` identifying the main package (defaults to `.`).
 - `--verifier-url <VERIFIER_URL>` Verification API endpoint (defaults to `https://miden-source-code-verification-api-registry.walnut.dev`).
 

@@ -1,6 +1,6 @@
 [package]
 name = "miden-verify"
-version = "0.5.0"
+version = "0.6.0"
 description = "Verify Miden accounts and notes from the command line."
 authors = ["Miden contributors"]
 repository = "https://github.com/walnuthq/miden-verify"
@@ -13,9 +13,9 @@ readme = "README.md"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0"
-clap = { version = "4.6", features = ["derive"] }
-miden-protocol = { version = "0.15" }
-tokio = { version = "1.52", features = ["rt-multi-thread", "net", "macros", "fs"] }
-reqwest = { version = "0.13", features = ["json"] }
-serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+miden-protocol = { version = "0.16.1" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "fs"] }
+reqwest = { version = "0.13.5", features = ["json"] }
+serde = { version = "1.0.229", features = ["derive"] }
