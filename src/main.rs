@@ -452,7 +452,7 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Account { account_id, .. } =
-            parse_resource_id("0xdef0e93b672a39117a3af1520c6047").expect("parse resource id")
+            parse_resource_id("0x858c680a7a66d2916230cc8c2a6c98").expect("parse resource id")
         else {
             panic!("expected an account resource");
         };
@@ -483,7 +483,7 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Note(note_id) =
-            parse_resource_id("0x7c6f75aeedeca77ef95c2ac95b69c59a064c30ab037a46a843b0f5a7dc0f6a30")
+            parse_resource_id("0x5a1fdb8754d741e53246d24e437eff26029fe4b7be66f7fa9a1a66ed1ba787a2")
                 .expect("parse resource id")
         else {
             panic!("expected a note resource");

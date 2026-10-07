@@ -16,13 +16,13 @@ To get started, you must first install [midenup](https://github.com/0xMiden/mide
 Pass the account ID (or address) of the deployed account:
 
 ```
-miden verify 0xdef0e93b672a39117a3af1520c6047 --project-path ~/miden-verify/project-template/counter-contract
+miden verify 0x858c680a7a66d2916230cc8c2a6c98 --project-path ~/miden-verify/project-template/counter-contract
 ```
 
 You can also pass a bech32 account address, which carries its own network ID:
 
 ```
-miden verify mtst1ar00p6fmvu4rjyt68tc4yrrqguh55ssx --project-path ~/miden-verify/project-template/counter-contract
+miden verify mtst1azzcc6q20fnd9ytzxrxgc2nvnqd06pxh --project-path ~/miden-verify/project-template/counter-contract
 ```
 
 ### Verifying a note with dependencies
@@ -30,7 +30,7 @@ miden verify mtst1ar00p6fmvu4rjyt68tc4yrrqguh55ssx --project-path ~/miden-verify
 When the project path contains several packages (the entrypoint package and its dependencies), point `--project-path` at the top-level directory and select the entrypoint package with `--entrypoint`:
 
 ```
-miden verify 0x7c6f75aeedeca77ef95c2ac95b69c59a064c30ab037a46a843b0f5a7dc0f6a30 --project-path ~/miden-verify/project-template --entrypoint counter-note
+miden verify 0x5a1fdb8754d741e53246d24e437eff26029fe4b7be66f7fa9a1a66ed1ba787a2 --project-path ~/miden-verify/project-template --entrypoint counter-note
 ```
 
 ### Options
