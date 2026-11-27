@@ -27,7 +27,7 @@ struct Args {
     /// Account address, account ID, or note ID to verify
     #[arg(value_name = "RESOURCE_ID")]
     resource_id: String,
-    /// Network ID (mtst = testnet, mdev = devnet)
+    /// Network ID (mtst = testnet, mdev = devnet, mm = mainnet)
     #[arg(long, default_value = "mtst", value_name = "NETWORK_ID")]
     network_id: String,
     /// Top-level project directory containing the entrypoint package and its dependencies
@@ -108,6 +108,8 @@ fn parse_resource_id(resource_id: &str) -> Result<Resource> {
 
 // --- Project file collection ---
 
+const MANIFEST: &str = "miden-project.toml";
+
 /// Returns the relative path rendered as a `/`-joined key, or `None` if any
 /// component is not valid UTF-8.
 fn relative_key(rel: &Path) -> Option<String> {
@@ -116,33 +118,18 @@ fn relative_key(rel: &Path) -> Option<String> {
     Some(components.join("/"))
 }
 
-/// Decides whether a project-relative file path should be uploaded.
+/// Decides whether a project-relative file path should be uploaded: every
+/// `miden-project.toml` and every `*.masm` file, wherever it sits, since a
+/// manifest's `[lib] path` can point anywhere in the tree. Directories are
+/// pruned in [`collect_files`].
 ///
-/// Included: `Cargo.toml`, `Cargo.lock` (pins dependency versions so the
-/// verifier reproduces the same build), `build.rs`, `miden-project.toml`,
-/// `rust-toolchain.toml`, `.cargo/config.toml`, and any file living under a
-/// `src/` directory (recursively). Everything else is excluded; `target/`
-/// build artifacts are never walked.
+/// Keep in step with the web-verifier's `collect-project-files.ts` in
+/// `walnuthq/miden-source-code-verification`.
 fn is_included(rel: &Path) -> bool {
-    let components = rel.components().filter_map(|c| c.as_os_str().to_str()).collect::<Vec<_>>();
-    let Some((file_name, parents)) = components.split_last() else {
+    let Some(file_name) = rel.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    // Any file under a `src/` directory (covers nested modules).
-    if parents.contains(&"src") {
-        return true;
-    }
-    if matches!(
-        *file_name,
-        "Cargo.toml" | "Cargo.lock" | "build.rs" | "miden-project.toml" | "rust-toolchain.toml"
-    ) {
-        return true;
-    }
-    // `.cargo/config.toml`
-    if *file_name == "config.toml" && parents.last() == Some(&".cargo") {
-        return true;
-    }
-    false
+    file_name == MANIFEST || file_name.ends_with(".masm")
 }
 
 fn collect_files(dir: &Path, base: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
@@ -155,8 +142,8 @@ fn collect_files(dir: &Path, base: &Path, files: &mut BTreeMap<String, String>) 
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if file_type.is_dir() {
-            // Skip build artifacts and hidden directories other than `.cargo`.
-            if name == "target" || (name.starts_with('.') && name != ".cargo") {
+            // Skip build artifacts and hidden directories.
+            if name == "target" || name.starts_with('.') {
                 continue;
             }
             collect_files(&path, base, files)?;
@@ -179,6 +166,27 @@ fn collect_files(dir: &Path, base: &Path, files: &mut BTreeMap<String, String>) 
 fn build_files_map(project_dir: &Path) -> Result<BTreeMap<String, String>> {
     let mut files = BTreeMap::new();
     collect_files(project_dir, project_dir, &mut files)?;
+    Ok(files)
+}
+
+/// Builds the files map for `project_dir` and checks, before any request, that
+/// `<project_dir>/<entrypoint>` is a MASM project the verifier can take.
+fn collect_project(project_dir: &Path, entrypoint: &str) -> Result<BTreeMap<String, String>> {
+    let files = build_files_map(project_dir)?;
+    let package_dir = match entrypoint {
+        "." | "" => project_dir.to_path_buf(),
+        _ => project_dir.join(entrypoint),
+    };
+    let has_masm = files.keys().any(|key| key.ends_with(".masm"));
+    if package_dir.join("Cargo.toml").is_file() && !has_masm {
+        bail!(
+            "{} is a Rust project: Rust projects are no longer supported, see the README",
+            package_dir.display()
+        );
+    }
+    if !package_dir.join(MANIFEST).is_file() {
+        bail!("no {} found in {}", MANIFEST, package_dir.display());
+    }
     Ok(files)
 }
 
@@ -218,7 +226,7 @@ async fn verify_account_component(
     );
     let body = VerifyAccountRequestBody {
         account_id: account_id.to_hex(),
-        files: build_files_map(project_dir)?,
+        files: collect_project(project_dir, entrypoint)?,
         entrypoint: entrypoint.to_string(),
         source: SOURCE.to_string(),
     };
@@ -243,7 +251,7 @@ async fn verify_note(
     );
     let body = VerifyNoteRequestBody {
         note_id: note_id.to_hex(),
-        files: build_files_map(project_dir)?,
+        files: collect_project(project_dir, entrypoint)?,
         entrypoint: entrypoint.to_string(),
         source: SOURCE.to_string(),
     };
@@ -343,27 +351,14 @@ mod tests {
         let keys: Vec<&str> = files.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec![
-                ".cargo/config.toml",
-                "Cargo.lock",
-                "Cargo.toml",
-                "build.rs",
-                "miden-project.toml",
-                "rust-toolchain.toml",
-                "src/lib.rs"
-            ],
+            vec!["counter_contract.masm", "miden-project.toml"],
             "unexpected file set for single-package project_path"
         );
 
-        // Excluded files must not appear.
-        assert!(!files.contains_key(".DS_Store"));
-
         // Contents are read verbatim from disk.
-        let expected = fs::read_to_string(dir.join("src/lib.rs")).unwrap();
-        assert_eq!(files["src/lib.rs"], expected);
-        let expected = fs::read_to_string(dir.join("build.rs")).unwrap();
-        assert_eq!(files["build.rs"], expected);
-        assert!(!files["Cargo.toml"].is_empty());
+        let expected = fs::read_to_string(dir.join("counter_contract.masm")).unwrap();
+        assert_eq!(files["counter_contract.masm"], expected);
+        assert!(!files["miden-project.toml"].is_empty());
     }
 
     #[test]
@@ -371,41 +366,40 @@ mod tests {
         let dir = template_dir();
         let files = build_files_map(&dir).expect("build_files_map");
 
-        for pkg in ["counter-contract", "counter-note"] {
-            for suffix in [
-                "Cargo.toml",
-                "Cargo.lock",
-                "build.rs",
-                "miden-project.toml",
-                "rust-toolchain.toml",
-                ".cargo/config.toml",
-                "src/lib.rs",
-            ] {
-                let key = format!("{pkg}/{suffix}");
-                assert!(files.contains_key(&key), "missing expected key {key}");
-            }
-        }
+        let keys: Vec<&str> = files.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "counter-contract/counter_contract.masm",
+                "counter-contract/miden-project.toml",
+                "counter-note/counter_note.masm",
+                "counter-note/miden-project.toml",
+            ],
+            "unexpected file set for multi-package project_path"
+        );
+        collect_project(&dir, "counter-note").expect("counter-note is a MASM project");
     }
 
     #[test]
-    fn includes_lockfile_and_excludes_artifacts_and_hidden_files() {
+    fn includes_masm_anywhere_and_excludes_rust_artifacts_and_hidden_files() {
         let fixture = Fixture::new(
             "collect",
             &[
+                ("miden-project.toml", "[package]"),
+                ("lib.masm", "# root"),
+                ("asm/nested/util.masm", "# nested"),
+                ("src/main.masm", "# src"),
                 ("Cargo.toml", "[package]"),
                 ("Cargo.lock", "version = 4"),
                 ("build.rs", "fn main() {}"),
-                ("miden-project.toml", "[package]"),
                 ("rust-toolchain.toml", "[toolchain]"),
-                (".cargo/config.toml", "[build]"),
                 ("src/lib.rs", "// lib"),
-                ("src/nested/mod.rs", "// nested"),
+                (".cargo/config.toml", "[build]"),
+                (".hidden/hidden.masm", "# hidden"),
                 ("README.md", "# readme"),
                 (".DS_Store", ""),
-                // `cargo package` output mirrors included files and must be skipped.
-                ("target/package/pkg-0.1.0/Cargo.toml", "[package]"),
-                ("target/package/pkg-0.1.0/Cargo.lock", "version = 4"),
-                ("target/package/pkg-0.1.0/src/lib.rs", "// lib"),
+                ("target/out/miden-project.toml", "[package]"),
+                ("target/out/lib.masm", "# built"),
             ],
         );
         let files = build_files_map(&fixture.0).expect("build_files_map");
@@ -413,19 +407,41 @@ mod tests {
         let keys: Vec<&str> = files.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec![
-                ".cargo/config.toml",
-                "Cargo.lock",
-                "Cargo.toml",
-                "build.rs",
-                "miden-project.toml",
-                "rust-toolchain.toml",
-                "src/lib.rs",
-                "src/nested/mod.rs",
-            ],
+            vec!["asm/nested/util.masm", "lib.masm", "miden-project.toml", "src/main.masm"],
             "unexpected file set"
         );
-        assert_eq!(files["Cargo.lock"], "version = 4");
+        assert_eq!(files["asm/nested/util.masm"], "# nested");
+    }
+
+    #[test]
+    fn refuses_entrypoint_without_manifest() {
+        let fixture = Fixture::new(
+            "no-manifest",
+            &[("pkg/miden-project.toml", "[package]"), ("pkg/lib.masm", "# lib")],
+        );
+        let err = collect_project(&fixture.0, ".").expect_err("no manifest at the root");
+        assert!(err.to_string().contains("no miden-project.toml found in"), "{err}");
+        collect_project(&fixture.0, "pkg").expect("manifest under the entrypoint");
+    }
+
+    #[test]
+    fn refuses_rust_project() {
+        // A project from the Rust compiler era: a manifest, but no MASM sources.
+        let fixture = Fixture::new(
+            "rust",
+            &[
+                ("Cargo.toml", "[package]"),
+                ("miden-project.toml", "[package]"),
+                ("src/lib.rs", "// lib"),
+            ],
+        );
+        let err = collect_project(&fixture.0, ".").expect_err("Rust project");
+        assert!(err.to_string().contains("Rust projects are no longer supported"), "{err}");
+
+        // Without a manifest it is still reported as a Rust project.
+        let fixture = Fixture::new("rust-no-manifest", &[("Cargo.toml", "[package]")]);
+        let err = collect_project(&fixture.0, ".").expect_err("Rust project");
+        assert!(err.to_string().contains("Rust projects are no longer supported"), "{err}");
     }
 
     /// Unwraps a verification result, counting the registry's "already verified"
@@ -452,7 +468,7 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Account { account_id, .. } =
-            parse_resource_id("0x858c680a7a66d2916230cc8c2a6c98").expect("parse resource id")
+            parse_resource_id("0x2d719c50f6bfa3113cb6960d5ba6d7").expect("parse resource id")
         else {
             panic!("expected an account resource");
         };
@@ -483,7 +499,7 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Note(note_id) =
-            parse_resource_id("0x5a1fdb8754d741e53246d24e437eff26029fe4b7be66f7fa9a1a66ed1ba787a2")
+            parse_resource_id("0xa1eebb1da617de82a9b3fdc8d7151c2e1161ea9f76834981d8914fa97086685f")
                 .expect("parse resource id")
         else {
             panic!("expected a note resource");
