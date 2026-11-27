@@ -12,7 +12,7 @@ use miden_protocol::{
     address::{Address, AddressId, NetworkId},
     note::NoteId,
 };
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
 /// CLI to verify Miden accounts & notes
@@ -192,7 +192,26 @@ fn collect_project(project_dir: &Path, entrypoint: &str) -> Result<BTreeMap<Stri
 
 // --- Verification ---
 
-async fn post_verify<B: Serialize + ?Sized>(client: &Client, url: &str, body: &B) -> Result<bool> {
+/// What the verifier answered.
+#[derive(Debug, PartialEq, Eq)]
+enum Verification {
+    /// The package matches on-chain and the registry recorded it.
+    Verified,
+    /// The package matches on-chain, but the registry already holds a record
+    /// for it, so nothing new was recorded.
+    AlreadyVerified,
+    /// The package does not match on-chain.
+    NotVerified,
+}
+
+/// Posts a verification request. The registry answers `409 Conflict` only
+/// after the uploaded package has been assembled and has matched on-chain,
+/// when the record already exists: that counts as a match.
+async fn post_verify<B: Serialize + ?Sized>(
+    client: &Client,
+    url: &str,
+    body: &B,
+) -> Result<Verification> {
     let response = client
         .post(url)
         .json(body)
@@ -200,13 +219,20 @@ async fn post_verify<B: Serialize + ?Sized>(client: &Client, url: &str, body: &B
         .await
         .context("failed to send verification request")?;
     let status = response.status();
+    if status == StatusCode::CONFLICT {
+        return Ok(Verification::AlreadyVerified);
+    }
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
         bail!("verifier returned {}: {}", status, text);
     }
     let VerifyResponse { verified } =
         response.json().await.context("failed to parse verifier response")?;
-    Ok(verified)
+    Ok(if verified {
+        Verification::Verified
+    } else {
+        Verification::NotVerified
+    })
 }
 
 async fn verify_account_component(
@@ -216,7 +242,7 @@ async fn verify_account_component(
     project_dir: &Path,
     entrypoint: &str,
     verifier_url: &str,
-) -> Result<bool> {
+) -> Result<Verification> {
     println!(
         "Verifying account {} on network {}, project: {}, entrypoint: {}",
         account_id,
@@ -241,7 +267,7 @@ async fn verify_note(
     project_dir: &Path,
     entrypoint: &str,
     verifier_url: &str,
-) -> Result<bool> {
+) -> Result<Verification> {
     println!(
         "Verifying note {} on network {}, project: {}, entrypoint: {}",
         note_id,
@@ -272,13 +298,13 @@ async fn main() -> Result<ExitCode> {
 
     let client = Client::new();
 
-    let (verified, kind) = match parse_resource_id(&args.resource_id)? {
+    let (verification, kind) = match parse_resource_id(&args.resource_id)? {
         Resource::Account {
             network_id,
             account_id,
         } => {
             let network_id = network_id.unwrap_or(fallback_network_id);
-            let verified = verify_account_component(
+            let verification = verify_account_component(
                 &client,
                 &network_id,
                 &account_id,
@@ -287,10 +313,10 @@ async fn main() -> Result<ExitCode> {
                 &args.verifier_url,
             )
             .await?;
-            (verified, "Account component")
+            (verification, "Account component")
         }
         Resource::Note(note_id) => {
-            let verified = verify_note(
+            let verification = verify_note(
                 &client,
                 &fallback_network_id,
                 &note_id,
@@ -299,16 +325,23 @@ async fn main() -> Result<ExitCode> {
                 &args.verifier_url,
             )
             .await?;
-            (verified, "Note script")
+            (verification, "Note script")
         }
     };
 
-    if verified {
-        println!("{} successfully verified", kind);
-        Ok(ExitCode::SUCCESS)
-    } else {
-        eprintln!("{} could not be verified", kind);
-        Ok(ExitCode::FAILURE)
+    match verification {
+        Verification::Verified => {
+            println!("{} successfully verified", kind);
+            Ok(ExitCode::SUCCESS)
+        }
+        Verification::AlreadyVerified => {
+            println!("{} already verified (source matches, nothing new recorded)", kind);
+            Ok(ExitCode::SUCCESS)
+        }
+        Verification::NotVerified => {
+            eprintln!("{} could not be verified", kind);
+            Ok(ExitCode::FAILURE)
+        }
     }
 }
 
@@ -444,16 +477,64 @@ mod tests {
         assert!(err.to_string().contains("Rust projects are no longer supported"), "{err}");
     }
 
-    /// Unwraps a verification result, counting the registry's "already verified"
-    /// rejection as a success: the registry only raises it once the compiled
-    /// package has matched on-chain, and it is what every run after the first
-    /// one gets back, since a successful verification is recorded.
-    fn verified_or_already_verified(result: Result<bool>, already_verified: &str) -> bool {
-        match result {
-            Ok(verified) => verified,
-            Err(err) if err.to_string().contains(already_verified) => true,
-            Err(err) => panic!("verification request: {err:#}"),
-        }
+    /// Serves one canned HTTP response on a local port and returns its URL.
+    fn serve_once(status_line: &'static str, body: &'static str) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            // Read the whole request before answering, so the client sees no reset.
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            let mut request_body = vec![0; content_length];
+            reader.read_exact(&mut request_body).unwrap();
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: \
+                 {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            reader.get_mut().write_all(response.as_bytes()).unwrap();
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn conflict_counts_as_already_verified() {
+        let url = serve_once("409 Conflict", r#"{"error":"note already verified"}"#);
+        let verification = post_verify(&Client::new(), &url, &()).await.expect("post_verify");
+        assert_eq!(verification, Verification::AlreadyVerified);
+    }
+
+    #[tokio::test]
+    async fn verified_flag_is_read_from_the_response() {
+        let url = serve_once("200 OK", r#"{"verified":true}"#);
+        let verification = post_verify(&Client::new(), &url, &()).await.expect("post_verify");
+        assert_eq!(verification, Verification::Verified);
+
+        let url = serve_once("200 OK", r#"{"verified":false}"#);
+        let verification = post_verify(&Client::new(), &url, &()).await.expect("post_verify");
+        assert_eq!(verification, Verification::NotVerified);
+    }
+
+    #[tokio::test]
+    async fn other_errors_are_reported() {
+        let url = serve_once("400 Bad Request", r#"{"error":"no miden-project.toml"}"#);
+        let err = post_verify(&Client::new(), &url, &()).await.expect_err("400");
+        assert!(err.to_string().contains("verifier returned 400"), "{err}");
     }
 
     /// End-to-end check against a locally running verifier.
@@ -482,9 +563,13 @@ mod tests {
             "http://localhost:8081",
         )
         .await;
-        let verified = verified_or_already_verified(result, "account component already verified");
+        let verification = result.expect("verification request");
 
-        assert!(verified, "account should be verified by the local verifier");
+        assert_ne!(
+            verification,
+            Verification::NotVerified,
+            "account should be verified by the local verifier"
+        );
     }
 
     /// End-to-end check of note verification against a locally running verifier.
@@ -514,8 +599,12 @@ mod tests {
             "http://localhost:8081",
         )
         .await;
-        let verified = verified_or_already_verified(result, "note already verified");
+        let verification = result.expect("verification request");
 
-        assert!(verified, "note should be verified by the local verifier");
+        assert_ne!(
+            verification,
+            Verification::NotVerified,
+            "note should be verified by the local verifier"
+        );
     }
 }
