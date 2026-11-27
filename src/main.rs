@@ -12,7 +12,7 @@ use miden_protocol::{
     address::{Address, AddressId, NetworkId},
     note::NoteId,
 };
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
 /// CLI to verify Miden accounts & notes
@@ -27,7 +27,7 @@ struct Args {
     /// Account address, account ID, or note ID to verify
     #[arg(value_name = "RESOURCE_ID")]
     resource_id: String,
-    /// Network ID (mtst = testnet, mdev = devnet)
+    /// Network ID (mtst = testnet, mdev = devnet, mm = mainnet)
     #[arg(long, default_value = "mtst", value_name = "NETWORK_ID")]
     network_id: String,
     /// Top-level project directory containing the entrypoint package and its dependencies
@@ -108,6 +108,8 @@ fn parse_resource_id(resource_id: &str) -> Result<Resource> {
 
 // --- Project file collection ---
 
+const MANIFEST: &str = "miden-project.toml";
+
 /// Returns the relative path rendered as a `/`-joined key, or `None` if any
 /// component is not valid UTF-8.
 fn relative_key(rel: &Path) -> Option<String> {
@@ -116,33 +118,18 @@ fn relative_key(rel: &Path) -> Option<String> {
     Some(components.join("/"))
 }
 
-/// Decides whether a project-relative file path should be uploaded.
+/// Decides whether a project-relative file path should be uploaded: every
+/// `miden-project.toml` and every `*.masm` file, wherever it sits, since a
+/// manifest's `[lib] path` can point anywhere in the tree. Directories are
+/// pruned in [`collect_files`].
 ///
-/// Included: `Cargo.toml`, `Cargo.lock` (pins dependency versions so the
-/// verifier reproduces the same build), `build.rs`, `miden-project.toml`,
-/// `rust-toolchain.toml`, `.cargo/config.toml`, and any file living under a
-/// `src/` directory (recursively). Everything else is excluded; `target/`
-/// build artifacts are never walked.
+/// Keep in step with the web-verifier's `collect-project-files.ts` in
+/// `walnuthq/miden-source-code-verification`.
 fn is_included(rel: &Path) -> bool {
-    let components = rel.components().filter_map(|c| c.as_os_str().to_str()).collect::<Vec<_>>();
-    let Some((file_name, parents)) = components.split_last() else {
+    let Some(file_name) = rel.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    // Any file under a `src/` directory (covers nested modules).
-    if parents.contains(&"src") {
-        return true;
-    }
-    if matches!(
-        *file_name,
-        "Cargo.toml" | "Cargo.lock" | "build.rs" | "miden-project.toml" | "rust-toolchain.toml"
-    ) {
-        return true;
-    }
-    // `.cargo/config.toml`
-    if *file_name == "config.toml" && parents.last() == Some(&".cargo") {
-        return true;
-    }
-    false
+    file_name == MANIFEST || file_name.ends_with(".masm")
 }
 
 fn collect_files(dir: &Path, base: &Path, files: &mut BTreeMap<String, String>) -> Result<()> {
@@ -155,8 +142,8 @@ fn collect_files(dir: &Path, base: &Path, files: &mut BTreeMap<String, String>) 
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if file_type.is_dir() {
-            // Skip build artifacts and hidden directories other than `.cargo`.
-            if name == "target" || (name.starts_with('.') && name != ".cargo") {
+            // Skip build artifacts and hidden directories.
+            if name == "target" || name.starts_with('.') {
                 continue;
             }
             collect_files(&path, base, files)?;
@@ -182,9 +169,49 @@ fn build_files_map(project_dir: &Path) -> Result<BTreeMap<String, String>> {
     Ok(files)
 }
 
+/// Builds the files map for `project_dir` and checks, before any request, that
+/// `<project_dir>/<entrypoint>` is a MASM project the verifier can take.
+fn collect_project(project_dir: &Path, entrypoint: &str) -> Result<BTreeMap<String, String>> {
+    let files = build_files_map(project_dir)?;
+    let package_dir = match entrypoint {
+        "." | "" => project_dir.to_path_buf(),
+        _ => project_dir.join(entrypoint),
+    };
+    let has_masm = files.keys().any(|key| key.ends_with(".masm"));
+    if package_dir.join("Cargo.toml").is_file() && !has_masm {
+        bail!(
+            "{} is a Rust project: Rust projects are no longer supported, see the README",
+            package_dir.display()
+        );
+    }
+    if !package_dir.join(MANIFEST).is_file() {
+        bail!("no {} found in {}", MANIFEST, package_dir.display());
+    }
+    Ok(files)
+}
+
 // --- Verification ---
 
-async fn post_verify<B: Serialize + ?Sized>(client: &Client, url: &str, body: &B) -> Result<bool> {
+/// What the verifier answered.
+#[derive(Debug, PartialEq, Eq)]
+enum Verification {
+    /// The package matches on-chain and the registry recorded it.
+    Verified,
+    /// The package matches on-chain, but the registry already holds a record
+    /// for it, so nothing new was recorded.
+    AlreadyVerified,
+    /// The package does not match on-chain.
+    NotVerified,
+}
+
+/// Posts a verification request. The registry answers `409 Conflict` only
+/// after the uploaded package has been assembled and has matched on-chain,
+/// when the record already exists: that counts as a match.
+async fn post_verify<B: Serialize + ?Sized>(
+    client: &Client,
+    url: &str,
+    body: &B,
+) -> Result<Verification> {
     let response = client
         .post(url)
         .json(body)
@@ -192,13 +219,20 @@ async fn post_verify<B: Serialize + ?Sized>(client: &Client, url: &str, body: &B
         .await
         .context("failed to send verification request")?;
     let status = response.status();
+    if status == StatusCode::CONFLICT {
+        return Ok(Verification::AlreadyVerified);
+    }
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
         bail!("verifier returned {}: {}", status, text);
     }
     let VerifyResponse { verified } =
         response.json().await.context("failed to parse verifier response")?;
-    Ok(verified)
+    Ok(if verified {
+        Verification::Verified
+    } else {
+        Verification::NotVerified
+    })
 }
 
 async fn verify_account_component(
@@ -208,7 +242,7 @@ async fn verify_account_component(
     project_dir: &Path,
     entrypoint: &str,
     verifier_url: &str,
-) -> Result<bool> {
+) -> Result<Verification> {
     println!(
         "Verifying account {} on network {}, project: {}, entrypoint: {}",
         account_id,
@@ -218,7 +252,7 @@ async fn verify_account_component(
     );
     let body = VerifyAccountRequestBody {
         account_id: account_id.to_hex(),
-        files: build_files_map(project_dir)?,
+        files: collect_project(project_dir, entrypoint)?,
         entrypoint: entrypoint.to_string(),
         source: SOURCE.to_string(),
     };
@@ -233,7 +267,7 @@ async fn verify_note(
     project_dir: &Path,
     entrypoint: &str,
     verifier_url: &str,
-) -> Result<bool> {
+) -> Result<Verification> {
     println!(
         "Verifying note {} on network {}, project: {}, entrypoint: {}",
         note_id,
@@ -243,7 +277,7 @@ async fn verify_note(
     );
     let body = VerifyNoteRequestBody {
         note_id: note_id.to_hex(),
-        files: build_files_map(project_dir)?,
+        files: collect_project(project_dir, entrypoint)?,
         entrypoint: entrypoint.to_string(),
         source: SOURCE.to_string(),
     };
@@ -264,13 +298,13 @@ async fn main() -> Result<ExitCode> {
 
     let client = Client::new();
 
-    let (verified, kind) = match parse_resource_id(&args.resource_id)? {
+    let (verification, kind) = match parse_resource_id(&args.resource_id)? {
         Resource::Account {
             network_id,
             account_id,
         } => {
             let network_id = network_id.unwrap_or(fallback_network_id);
-            let verified = verify_account_component(
+            let verification = verify_account_component(
                 &client,
                 &network_id,
                 &account_id,
@@ -279,10 +313,10 @@ async fn main() -> Result<ExitCode> {
                 &args.verifier_url,
             )
             .await?;
-            (verified, "Account component")
+            (verification, "Account component")
         }
         Resource::Note(note_id) => {
-            let verified = verify_note(
+            let verification = verify_note(
                 &client,
                 &fallback_network_id,
                 &note_id,
@@ -291,16 +325,23 @@ async fn main() -> Result<ExitCode> {
                 &args.verifier_url,
             )
             .await?;
-            (verified, "Note script")
+            (verification, "Note script")
         }
     };
 
-    if verified {
-        println!("{} successfully verified", kind);
-        Ok(ExitCode::SUCCESS)
-    } else {
-        eprintln!("{} could not be verified", kind);
-        Ok(ExitCode::FAILURE)
+    match verification {
+        Verification::Verified => {
+            println!("{} successfully verified", kind);
+            Ok(ExitCode::SUCCESS)
+        }
+        Verification::AlreadyVerified => {
+            println!("{} already verified (source matches, nothing new recorded)", kind);
+            Ok(ExitCode::SUCCESS)
+        }
+        Verification::NotVerified => {
+            eprintln!("{} could not be verified", kind);
+            Ok(ExitCode::FAILURE)
+        }
     }
 }
 
@@ -343,27 +384,14 @@ mod tests {
         let keys: Vec<&str> = files.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec![
-                ".cargo/config.toml",
-                "Cargo.lock",
-                "Cargo.toml",
-                "build.rs",
-                "miden-project.toml",
-                "rust-toolchain.toml",
-                "src/lib.rs"
-            ],
+            vec!["counter_contract.masm", "miden-project.toml"],
             "unexpected file set for single-package project_path"
         );
 
-        // Excluded files must not appear.
-        assert!(!files.contains_key(".DS_Store"));
-
         // Contents are read verbatim from disk.
-        let expected = fs::read_to_string(dir.join("src/lib.rs")).unwrap();
-        assert_eq!(files["src/lib.rs"], expected);
-        let expected = fs::read_to_string(dir.join("build.rs")).unwrap();
-        assert_eq!(files["build.rs"], expected);
-        assert!(!files["Cargo.toml"].is_empty());
+        let expected = fs::read_to_string(dir.join("counter_contract.masm")).unwrap();
+        assert_eq!(files["counter_contract.masm"], expected);
+        assert!(!files["miden-project.toml"].is_empty());
     }
 
     #[test]
@@ -371,41 +399,40 @@ mod tests {
         let dir = template_dir();
         let files = build_files_map(&dir).expect("build_files_map");
 
-        for pkg in ["counter-contract", "counter-note"] {
-            for suffix in [
-                "Cargo.toml",
-                "Cargo.lock",
-                "build.rs",
-                "miden-project.toml",
-                "rust-toolchain.toml",
-                ".cargo/config.toml",
-                "src/lib.rs",
-            ] {
-                let key = format!("{pkg}/{suffix}");
-                assert!(files.contains_key(&key), "missing expected key {key}");
-            }
-        }
+        let keys: Vec<&str> = files.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "counter-contract/counter_contract.masm",
+                "counter-contract/miden-project.toml",
+                "counter-note/counter_note.masm",
+                "counter-note/miden-project.toml",
+            ],
+            "unexpected file set for multi-package project_path"
+        );
+        collect_project(&dir, "counter-note").expect("counter-note is a MASM project");
     }
 
     #[test]
-    fn includes_lockfile_and_excludes_artifacts_and_hidden_files() {
+    fn includes_masm_anywhere_and_excludes_rust_artifacts_and_hidden_files() {
         let fixture = Fixture::new(
             "collect",
             &[
+                ("miden-project.toml", "[package]"),
+                ("lib.masm", "# root"),
+                ("asm/nested/util.masm", "# nested"),
+                ("src/main.masm", "# src"),
                 ("Cargo.toml", "[package]"),
                 ("Cargo.lock", "version = 4"),
                 ("build.rs", "fn main() {}"),
-                ("miden-project.toml", "[package]"),
                 ("rust-toolchain.toml", "[toolchain]"),
-                (".cargo/config.toml", "[build]"),
                 ("src/lib.rs", "// lib"),
-                ("src/nested/mod.rs", "// nested"),
+                (".cargo/config.toml", "[build]"),
+                (".hidden/hidden.masm", "# hidden"),
                 ("README.md", "# readme"),
                 (".DS_Store", ""),
-                // `cargo package` output mirrors included files and must be skipped.
-                ("target/package/pkg-0.1.0/Cargo.toml", "[package]"),
-                ("target/package/pkg-0.1.0/Cargo.lock", "version = 4"),
-                ("target/package/pkg-0.1.0/src/lib.rs", "// lib"),
+                ("target/out/miden-project.toml", "[package]"),
+                ("target/out/lib.masm", "# built"),
             ],
         );
         let files = build_files_map(&fixture.0).expect("build_files_map");
@@ -413,31 +440,101 @@ mod tests {
         let keys: Vec<&str> = files.keys().map(String::as_str).collect();
         assert_eq!(
             keys,
-            vec![
-                ".cargo/config.toml",
-                "Cargo.lock",
-                "Cargo.toml",
-                "build.rs",
-                "miden-project.toml",
-                "rust-toolchain.toml",
-                "src/lib.rs",
-                "src/nested/mod.rs",
-            ],
+            vec!["asm/nested/util.masm", "lib.masm", "miden-project.toml", "src/main.masm"],
             "unexpected file set"
         );
-        assert_eq!(files["Cargo.lock"], "version = 4");
+        assert_eq!(files["asm/nested/util.masm"], "# nested");
     }
 
-    /// Unwraps a verification result, counting the registry's "already verified"
-    /// rejection as a success: the registry only raises it once the compiled
-    /// package has matched on-chain, and it is what every run after the first
-    /// one gets back, since a successful verification is recorded.
-    fn verified_or_already_verified(result: Result<bool>, already_verified: &str) -> bool {
-        match result {
-            Ok(verified) => verified,
-            Err(err) if err.to_string().contains(already_verified) => true,
-            Err(err) => panic!("verification request: {err:#}"),
-        }
+    #[test]
+    fn refuses_entrypoint_without_manifest() {
+        let fixture = Fixture::new(
+            "no-manifest",
+            &[("pkg/miden-project.toml", "[package]"), ("pkg/lib.masm", "# lib")],
+        );
+        let err = collect_project(&fixture.0, ".").expect_err("no manifest at the root");
+        assert!(err.to_string().contains("no miden-project.toml found in"), "{err}");
+        collect_project(&fixture.0, "pkg").expect("manifest under the entrypoint");
+    }
+
+    #[test]
+    fn refuses_rust_project() {
+        // A project from the Rust compiler era: a manifest, but no MASM sources.
+        let fixture = Fixture::new(
+            "rust",
+            &[
+                ("Cargo.toml", "[package]"),
+                ("miden-project.toml", "[package]"),
+                ("src/lib.rs", "// lib"),
+            ],
+        );
+        let err = collect_project(&fixture.0, ".").expect_err("Rust project");
+        assert!(err.to_string().contains("Rust projects are no longer supported"), "{err}");
+
+        // Without a manifest it is still reported as a Rust project.
+        let fixture = Fixture::new("rust-no-manifest", &[("Cargo.toml", "[package]")]);
+        let err = collect_project(&fixture.0, ".").expect_err("Rust project");
+        assert!(err.to_string().contains("Rust projects are no longer supported"), "{err}");
+    }
+
+    /// Serves one canned HTTP response on a local port and returns its URL.
+    fn serve_once(status_line: &'static str, body: &'static str) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            // Read the whole request before answering, so the client sees no reset.
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            let mut request_body = vec![0; content_length];
+            reader.read_exact(&mut request_body).unwrap();
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: \
+                 {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            reader.get_mut().write_all(response.as_bytes()).unwrap();
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn conflict_counts_as_already_verified() {
+        let url = serve_once("409 Conflict", r#"{"error":"note already verified"}"#);
+        let verification = post_verify(&Client::new(), &url, &()).await.expect("post_verify");
+        assert_eq!(verification, Verification::AlreadyVerified);
+    }
+
+    #[tokio::test]
+    async fn verified_flag_is_read_from_the_response() {
+        let url = serve_once("200 OK", r#"{"verified":true}"#);
+        let verification = post_verify(&Client::new(), &url, &()).await.expect("post_verify");
+        assert_eq!(verification, Verification::Verified);
+
+        let url = serve_once("200 OK", r#"{"verified":false}"#);
+        let verification = post_verify(&Client::new(), &url, &()).await.expect("post_verify");
+        assert_eq!(verification, Verification::NotVerified);
+    }
+
+    #[tokio::test]
+    async fn other_errors_are_reported() {
+        let url = serve_once("400 Bad Request", r#"{"error":"no miden-project.toml"}"#);
+        let err = post_verify(&Client::new(), &url, &()).await.expect_err("400");
+        assert!(err.to_string().contains("verifier returned 400"), "{err}");
     }
 
     /// End-to-end check against a locally running verifier.
@@ -452,7 +549,7 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Account { account_id, .. } =
-            parse_resource_id("0x858c680a7a66d2916230cc8c2a6c98").expect("parse resource id")
+            parse_resource_id("0x2d719c50f6bfa3113cb6960d5ba6d7").expect("parse resource id")
         else {
             panic!("expected an account resource");
         };
@@ -466,9 +563,13 @@ mod tests {
             "http://localhost:8081",
         )
         .await;
-        let verified = verified_or_already_verified(result, "account component already verified");
+        let verification = result.expect("verification request");
 
-        assert!(verified, "account should be verified by the local verifier");
+        assert_ne!(
+            verification,
+            Verification::NotVerified,
+            "account should be verified by the local verifier"
+        );
     }
 
     /// End-to-end check of note verification against a locally running verifier.
@@ -483,7 +584,7 @@ mod tests {
         let network_id = NetworkId::new("mtst").expect("network id");
 
         let Resource::Note(note_id) =
-            parse_resource_id("0x5a1fdb8754d741e53246d24e437eff26029fe4b7be66f7fa9a1a66ed1ba787a2")
+            parse_resource_id("0xa1eebb1da617de82a9b3fdc8d7151c2e1161ea9f76834981d8914fa97086685f")
                 .expect("parse resource id")
         else {
             panic!("expected a note resource");
@@ -498,8 +599,12 @@ mod tests {
             "http://localhost:8081",
         )
         .await;
-        let verified = verified_or_already_verified(result, "note already verified");
+        let verification = result.expect("verification request");
 
-        assert!(verified, "note should be verified by the local verifier");
+        assert_ne!(
+            verification,
+            Verification::NotVerified,
+            "note should be verified by the local verifier"
+        );
     }
 }

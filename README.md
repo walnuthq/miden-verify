@@ -5,7 +5,7 @@ Verify Miden accounts and notes from the command-line.
 > [!WARNING]
 > This tool is still a work in progress.
 
-The `miden-verify` CLI allows Miden accounts and notes verification, give it a deployed account address or note ID and a Miden Rust project path and it will re-compile the Rust source code and verify that it matches the on-chain Miden Assembly.
+The `miden-verify` CLI allows Miden accounts and notes verification, give it a deployed account address or note ID and a Miden project path (a MASM project with a `miden-project.toml`) and it will re-assemble the project and verify that it matches the on-chain Miden Assembly.
 
 ## Usage
 
@@ -16,13 +16,13 @@ To get started, you must first install [midenup](https://github.com/0xMiden/mide
 Pass the account ID (or address) of the deployed account:
 
 ```
-miden verify 0x858c680a7a66d2916230cc8c2a6c98 --project-path ~/miden-verify/project-template/counter-contract
+miden verify 0x2d719c50f6bfa3113cb6960d5ba6d7 --project-path ~/miden-verify/project-template/counter-contract
 ```
 
 You can also pass a bech32 account address, which carries its own network ID:
 
 ```
-miden verify mtst1azzcc6q20fnd9ytzxrxgc2nvnqd06pxh --project-path ~/miden-verify/project-template/counter-contract
+miden verify mtst1aqkhr8zs76l6xyfuk6tq6kax6uuts82p --project-path ~/miden-verify/project-template/counter-contract
 ```
 
 ### Verifying a note with dependencies
@@ -30,14 +30,18 @@ miden verify mtst1azzcc6q20fnd9ytzxrxgc2nvnqd06pxh --project-path ~/miden-verify
 When the project path contains several packages (the entrypoint package and its dependencies), point `--project-path` at the top-level directory and select the entrypoint package with `--entrypoint`:
 
 ```
-miden verify 0x5a1fdb8754d741e53246d24e437eff26029fe4b7be66f7fa9a1a66ed1ba787a2 --project-path ~/miden-verify/project-template --entrypoint counter-note
+miden verify 0xa1eebb1da617de82a9b3fdc8d7151c2e1161ea9f76834981d8914fa97086685f --project-path ~/miden-verify/project-template --entrypoint counter-note
 ```
+
+### Rust projects
+
+Projects written in Rust for the Miden compiler (`cargo-miden`) are no longer supported: the verifier only re-assembles MASM projects. `miden-verify` 0.7.0 is the last version that uploaded Rust projects, and the verifier no longer accepts them.
 
 ### Options
 
 - `<RESOURCE_ID>` Account address, account ID or note ID (required).
-- `--network-id <NETWORK_ID>` Network ID (mtst/mdev, required when not decoded from account address, defaults to `mtst`).
-- `--project-path <PROJECT_PATH>` Top-level project directory containing the entrypoint package and its dependencies (defaults to the current working directory). The CLI uploads `Cargo.toml`, `Cargo.lock`, `build.rs`, `miden-project.toml`, `rust-toolchain.toml`, `.cargo/config.toml` and `src/` files found in the tree (`target/` directories are skipped).
+- `--network-id <NETWORK_ID>` Network ID (mtst/mdev/mm, required when not decoded from account address, defaults to `mtst`).
+- `--project-path <PROJECT_PATH>` Top-level project directory containing the entrypoint package and its dependencies (defaults to the current working directory). The CLI uploads every `miden-project.toml` and `*.masm` file found in the tree (`target/` and hidden directories are skipped).
 - `--entrypoint <ENTRYPOINT>` Entrypoint package relative to `PROJECT_PATH` identifying the main package (defaults to `.`).
 - `--verifier-url <VERIFIER_URL>` Verification API endpoint (defaults to `https://miden-source-code-verification-api-registry.walnut.dev`).
 

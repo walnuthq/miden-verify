@@ -1,6 +1,6 @@
 # Remove Rust project support from `miden-verify`
 
-Status: plan, not started. Written 2026-11-25.
+Status: implemented on `feat/masm-projects` (2026-11-27); release steps not done. Written 2026-11-25.
 
 > **Executor**: this plan is written for one agent in one session and ends in one PR. Start from an updated `main`, on the branch `feat/masm-projects`. Commit there; push, open a PR, publish a release or open a PR in another repo only when the user's prompt says so. No Claude attribution in commits or PRs. Deploying the template to Testnet needs the user's go-ahead in your session. Before starting, ask the user to confirm that the verifier has dropped cargo (its plans 08 and 09, `spec/remove-rust/` in `walnuthq/miden-source-code-verification`) and read the file rules its web-verifier shipped, since this CLI's filter must match them. Verify with `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test --all-targets --locked`, then the two ignored tests against a local verifier. Stop and report if the verifier's request or response shape differs from "Request and response" below.
 
